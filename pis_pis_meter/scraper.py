@@ -104,14 +104,17 @@ def _login(session: requests.Session, username: str, password: str) -> None:
     logger.info("Login successful, .ASPXAUTH cookie present")
 
 
-def _fetch(session: requests.Session, url: str) -> BeautifulSoup:
+def _fetch(session: requests.Session, url: str, return_html: bool = False):
     logger.info("Fetching URL: %s", url)
     r = session.get(url, headers=HEADERS, allow_redirects=True)
     logger.debug("GET %s -> status %s, final url %s", url, r.status_code, r.url)
     if r.status_code != 200:
         logger.error("GET %s failed with status %s", url, r.status_code)
         raise RuntimeError(f"GET {url} failed: {r.status_code}")
-    return BeautifulSoup(r.text, "html.parser")
+    soup = BeautifulSoup(r.text, "html.parser")
+    if return_html:
+        return soup, r.text
+    return soup
 
 
 def _detect_racuni_last_page(session: requests.Session) -> int:
@@ -731,8 +734,8 @@ def collect_pis_data(username: str, password: str) -> dict:
         session.headers.update(HEADERS)
         _login(session, username, password)
 
-        root_soup = _fetch(session, ROOT_URL)
-        promet_soup = _fetch(session, PROMET_URL)
+        root_soup, root_html = _fetch(session, ROOT_URL, return_html=True)
+        promet_soup, promet_html = _fetch(session, PROMET_URL, return_html=True)
 
         readings = _parse_root_readings(root_soup)
         promet = _parse_promet_table(promet_soup)
@@ -743,10 +746,13 @@ def collect_pis_data(username: str, password: str) -> dict:
         all_invoices = []
         racuni_period = None
 
+        racuni_html_pages = []
+
         for page in range(1, last_page + 1):
             url = PROMET_URL if page == 1 else f"{PROMET_URL}?page={page}"
             logger.info("Fetching racuni page %s: %s", page, url)
-            soup = _fetch(session, url)
+            soup, racuni_html = _fetch(session, url, return_html=True)
+            racuni_html_pages.append({"page": page, "html": racuni_html})
 
             if racuni_period is None:
                 racuni_period = _parse_racuni_period(soup)
@@ -784,6 +790,11 @@ def collect_pis_data(username: str, password: str) -> dict:
                 "promet_summary": summary,
                 "invoices": all_invoices,
                 "racuni_period": racuni_period,
+                "html": {
+                    "root": root_html,
+                    "promet": promet_html,
+                    "racuni_pages": racuni_html_pages,
+                },
             },
         }
 
