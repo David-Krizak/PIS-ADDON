@@ -11,20 +11,19 @@ This repository contains a Home Assistant add-on that logs into the PIS portal (
 2. Add this repository URL: `https://github.com/David-Krizak/PIS-ADDON`.
 3. After the repository refreshes, install **PIS Electricity Meter** from the list.
 4. Open the add-on and set the **username** and **password** options (required for logging into the PIS portal).
-5. Start the add-on. The API is available at `http://<home-assistant-host>:8080/data`.
-6. Optional: expose Prometheus metrics from `http://<home-assistant-host>:8080/metrics` or use the health check at `/health`.
+5. Start the add-on. The API is available at `http://<home-assistant-host>:8080/data` and the log viewer at `/logs`.
+6. A lightweight health check is available at `/health`.
 
 ## Current functionality
 - Logs into the PIS portal with the provided credentials.
 - Scrapes meter readings, invoices, and yearly finance data.
 - Computes basic metrics like last-period usage, average daily usage, and balance status.
-- Exposes all data as JSON at the `/data` endpoint, including cache metadata and optional force-refresh via `?refresh=true`.
-- Serves Prometheus-friendly metrics at `/metrics` and a health check at `/health`.
+- Exposes all data as JSON at the `/data` endpoint, including cache metadata, optional force-refresh via `?refresh=true`, and status indicators for degraded responses when the scraper falls back to cached data.
+- Includes an add-on log viewer at `/logs` and a health check at `/health`.
 
 ## Suggestions for further improvement
 - **Home Assistant sensors:** Publish balance/usage as native sensors via the Supervisor API instead of polling JSON directly.
 - **Ingress/UI:** Add an ingress-enabled dashboard to visualize invoices, trends, and errors inside Home Assistant.
-- **Resilience:** Retry failed scrapes and surface a degraded status rather than returning HTTP 500 immediately.
 - **Testing & CI:** Add unit tests around the scraper parsing functions and a lint pipeline to catch regressions.
 
 ## New configuration options
