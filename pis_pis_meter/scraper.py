@@ -2,7 +2,6 @@ import json
 import re
 import logging
 from datetime import datetime, date
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -114,6 +113,37 @@ def _fetch(session: requests.Session, url: str) -> BeautifulSoup:
         logger.error("GET %s failed with status %s", url, r.status_code)
         raise RuntimeError(f"GET {url} failed: {r.status_code}")
     return BeautifulSoup(r.text, "html.parser")
+
+
+def _fetch_racuni_last_page(session: requests.Session) -> BeautifulSoup:
+    """
+    Na /Promet pronađi paginaciju u #racuni i otvori ZADNJU stranicu računa.
+    To je stranica gdje su najnoviji računi (7-9/2025 i 10/2025 u tvom primjeru).
+    """
+    logger.info("Fetching /Promet to detect last racuni page")
+    soup = _fetch(session, PROMET_URL)
+
+    tfoot = soup.select_one("#racuni tfoot td")
+    if not tfoot:
+        logger.warning("No racuni tfoot pagination found, using base /Promet page")
+        return soup
+
+    last_page = None
+    for a in tfoot.select("a[data-swhglnk='true']"):
+        text = a.get_text(strip=True)
+        if text.isdigit():
+            num = int(text)
+            if last_page is None or num > last_page:
+                last_page = num
+
+    if not last_page:
+        logger.warning("Could not detect last page number, using base /Promet page")
+        return soup
+
+    # Paginacija koristi query ?page=X na istom endpointu
+    last_url = f"{PROMET_URL}?page={last_page}"
+    logger.info("Detected last racuni page=%s, fetching %s", last_page, last_url)
+    return _fetch(session, last_url)
 
 
 def _parse_euro_amount(text: str):
@@ -288,7 +318,7 @@ def _parse_promet_summary(soup: BeautifulSoup):
 
 def _parse_racuni(soup: BeautifulSoup):
     """
-    /Promet: section #racuni – table with invoice details + barcode.
+    /Promet?page=X: section #racuni – table with invoice details + barcode.
     Each row has:
       - <td class="racunLijevo"> ... tekst ... </td>
       - <td class="barcodeCentar"><img src="data:image/png;base64,..."></td>
@@ -382,67 +412,6 @@ def _parse_racuni_period(soup: BeautifulSoup):
     }
     logger.info("Parsed racuni period: %s", result)
     return result
-
-
-def _find_racuni_last_page_soup(session: requests.Session, soup: BeautifulSoup) -> BeautifulSoup:
-    """
-    Gleda paginaciju u #racuni tfoot i, ako nismo na zadnjoj stranici,
-    ode na zadnju stranicu i vrati taj soup.
-
-    Ponašanje:
-      - ako nema paginacije ili ne može odlučiti -> vrati originalni soup
-      - ako je zadnja stranica već current (broj bez <a>) -> vrati originalni soup
-      - inače prati href za najveći broj stranice i vraća novi soup
-    """
-    table = soup.select_one("#racuni table.altrowstable")
-    if not table:
-        logger.debug("No racuni table found for pagination check")
-        return soup
-
-    td = table.select_one("tfoot td")
-    if not td:
-        logger.debug("No racuni pagination cell found")
-        return soup
-
-    text = td.get_text(" ", strip=True)
-    all_nums = [int(x) for x in re.findall(r"\d+", text)]
-    if not all_nums:
-        logger.debug("No numeric page numbers found in racuni pagination")
-        return soup
-
-    # page brojevi iz <a> tagova
-    anchor_nums = {}
-    for a in td.find_all("a"):
-        txt = a.get_text(strip=True)
-        if txt.isdigit():
-            n = int(txt)
-            href = a.get("href")
-            if href:
-                anchor_nums[n] = href
-
-    anchor_set = set(anchor_nums.keys())
-    current_nums = [n for n in all_nums if n not in anchor_set]
-
-    last_page_num = max(all_nums)
-    logger.debug(
-        "Racuni pagination: all_nums=%s, anchor_nums=%s, current_nums=%s, last_page_num=%s",
-        all_nums, list(anchor_nums.keys()), current_nums, last_page_num,
-    )
-
-    # ako je zadnja stranica trenutna (nema linka na nju)
-    if last_page_num in current_nums:
-        logger.info("Already on last racuni page=%s", last_page_num)
-        return soup
-
-    # ako zadnja postoji kao link, idi na nju
-    href = anchor_nums.get(last_page_num)
-    if not href:
-        logger.warning("Could not find href for last racuni page=%s", last_page_num)
-        return soup
-
-    last_url = urljoin(PROMET_URL, href)
-    logger.info("Following racuni last page=%s -> %s", last_page_num, last_url)
-    return _fetch(session, last_url)
 
 
 def _enrich_invoices_with_payments(invoices, promet_rows):
@@ -553,13 +522,16 @@ def _compute_finance_metrics(promet_rows, summary, invoices):
     ukupno_zaduzenje = summary.get("Ukupno zaduženje", {}).get("value") or 0.0
     ukupna_uplata = summary.get("Ukupna uplata", {}).get("value") or 0.0
 
-    balance = dug_prev + ukupno_zaduzenje - ukupna_uplata  # + = dug, - = preplata
-    if balance > 0:
-        status = "dug"
-    elif balance < 0:
-        status = "preplata"
-    else:
+    # + = dug, - = preplata (float tolerancija)
+    balance = dug_prev + ukupno_zaduzenje - ukupna_uplata
+    EPS = 0.005
+    if abs(balance) < EPS:
+        balance = 0.0
         status = "podmireno"
+    elif balance > 0:
+        status = "dug"
+    else:
+        status = "preplata"
 
     overpayment_value = -balance if balance < 0 else 0.0
 
@@ -570,38 +542,7 @@ def _compute_finance_metrics(promet_rows, summary, invoices):
         balance, status, overpayment_value,
     )
 
-    unpaid_invoices = [inv for inv in invoices if not inv.get("paid")]
-    unpaid_total = sum((inv.get("amount") or 0.0) for inv in unpaid_invoices)
-    paid_invoices = [inv for inv in invoices if inv.get("paid")]
-
-    # pick last invoice from racuni if available, otherwise infer from promet
-    last_invoice = invoices[0] if invoices else None
-
-    if not last_invoice:
-        for row in promet_rows:
-            if (row.get("zaduzenje_value") or 0) > 0:
-                last_invoice = {
-                    "number": row.get("Opis"),
-                    "description": row.get("Opis"),
-                    "issue_date": row.get("parsed_date"),
-                    "due_date": None,
-                    "amount": row.get("zaduzenje_value"),
-                    "amount_raw": row.get("Zaduženje"),
-                }
-                logger.debug("Fallback last_invoice inferred from promet: %s", last_invoice)
-                break
-
-    days_until_due = None
-    is_overdue = None
-    if last_invoice and last_invoice.get("due_date"):
-        due = datetime.fromisoformat(last_invoice["due_date"]).date()
-        days_until_due = (due - today).days
-        is_overdue = days_until_due < 0
-        logger.debug(
-            "Last invoice due_date=%s, days_until_due=%s, is_overdue=%s",
-            due, days_until_due, is_overdue,
-        )
-
+    # ---------------- GODIŠNJA STATISTIKA ----------------
     current_year = today.year
     year_charges = 0.0
     year_payments = 0.0
@@ -612,22 +553,60 @@ def _compute_finance_metrics(promet_rows, summary, invoices):
         if not d_str:
             continue
         d = datetime.fromisoformat(d_str).date()
-        if d.year != current_year:
-            continue
         z = row.get("zaduzenje_value") or 0.0
         u = row.get("uplata_value") or 0.0
-        year_charges += z
-        year_payments += u
 
-        if z > 0:
-            key = f"{d.year}-{d.month:02d}"
-            charge_months[key] = charge_months.get(key, 0.0) + z
+        if d.year == current_year:
+            year_charges += z
+            year_payments += u
+            if z > 0:
+                key = f"{d.year}-{d.month:02d}"
+                charge_months[key] = charge_months.get(key, 0.0) + z
 
     sorted_months = sorted(charge_months.items(), key=lambda x: x[0], reverse=True)
     recent = sorted_months[:6]
     avg_recent_bill = None
     if recent:
         avg_recent_bill = sum(v for _, v in recent) / len(recent)
+
+    # ---------------- ZADNJI RAČUN ----------------
+    # Sortiramo račune po issue_date (datum računa), fallback na payment_date.
+    def _inv_sort_key(inv):
+        issue = inv.get("issue_date") or ""
+        payment = inv.get("payment_date") or ""
+        return issue or payment
+
+    sorted_invoices = sorted(
+        invoices,
+        key=_inv_sort_key,
+        reverse=True,
+    )
+
+    last_invoice = sorted_invoices[0] if sorted_invoices else None
+
+    # Fallback: ako uopće nemamo racune, koristi prvo zaduženje iz promet
+    if not last_invoice:
+        for row in promet_rows:
+            z = row.get("zaduzenje_value") or 0.0
+            if z <= 0:
+                continue
+            d_str = row.get("parsed_date")
+            d = datetime.fromisoformat(d_str).date() if d_str else None
+            last_invoice = {
+                "number": row.get("Opis"),
+                "description": row.get("Opis"),
+                "issue_date": d.isoformat() if d else None,
+                "due_date": None,
+                "amount": z,
+                "amount_raw": row.get("Zaduženje"),
+            }
+            logger.debug("Fallback last_invoice inferred from promet: %s", last_invoice)
+            break
+
+    # ---------------- NEPLAĆENI RAČUNI -------------
+    unpaid_invoices = [inv for inv in invoices if not inv.get("paid")]
+    unpaid_total = sum((inv.get("amount") or 0.0) for inv in unpaid_invoices)
+    paid_invoices = [inv for inv in invoices if inv.get("paid")]
 
     logger.debug(
         "Year stats: year=%s, charges=%.2f, payments=%.2f, avg_recent_bill=%s, "
@@ -647,9 +626,7 @@ def _compute_finance_metrics(promet_rows, summary, invoices):
             "overpayment": overpayment_value,
             "raw_summary": summary,
         },
-        "last_invoice": last_invoice,
-        "last_invoice_days_until_due": days_until_due,
-        "last_invoice_is_overdue": is_overdue,
+        "last_invoice": last_invoice,          # koristi se za sensor.pis_zadnji_racun_iznos
         "year_stats": {
             "year": current_year,
             "charges": year_charges,
@@ -705,13 +682,20 @@ def _compute_consumption_metrics(readings):
     if current_date:
         days_since_last_reading = (today - current_date).days
 
+    # APROKS CIJENE ZADNJEG PERIODA (€/kWh)
+    PRICE_PER_KWH = 0.53
+    approx_last_period_cost = None
+    if last_period_usage is not None:
+        approx_last_period_cost = last_period_usage * PRICE_PER_KWH
+
     logger.debug(
         "Consumption metrics: current_value=%s, previous_value=%s, "
         "last_period_usage=%s, days_between=%s, avg_daily_last_period=%s, "
-        "days_since_last_reading=%s",
+        "days_since_last_reading=%s, approx_last_period_cost=%s",
         current_value, previous_value,
         last_period_usage, days_between,
         avg_daily_last_period, days_since_last_reading,
+        approx_last_period_cost,
     )
 
     consumption = {
@@ -723,6 +707,7 @@ def _compute_consumption_metrics(readings):
         "days_since_last_reading": days_since_last_reading,
         "current_value": current_value,
         "previous_value": previous_value,
+        "approx_last_period_cost": approx_last_period_cost,
     }
     return consumption
 
@@ -732,9 +717,6 @@ def _compute_consumption_metrics(readings):
 def collect_pis_data(username: str, password: str) -> dict:
     """
     Main entry: logs in, fetches / and /Promet, returns structured dict.
-
-    BITNO: za /Promet koristi se ZADNJA stranica racuna (paginated #racuni),
-    tako da uvijek radiš s novijim računima.
     """
     logger.info("collect_pis_data: starting scrape for PIS portal")
     with requests.Session() as session:
@@ -742,17 +724,16 @@ def collect_pis_data(username: str, password: str) -> dict:
         _login(session, username, password)
 
         root_soup = _fetch(session, ROOT_URL)
-
-        # prvo dovući neku /Promet stranicu
-        first_promet_soup = _fetch(session, PROMET_URL)
-        # pa onda, ako treba, skočiti na zadnju stranicu racuna
-        promet_soup = _find_racuni_last_page_soup(session, first_promet_soup)
+        promet_soup = _fetch(session, PROMET_URL)
+        racuni_last_soup = _fetch_racuni_last_page(session)
 
         readings = _parse_root_readings(root_soup)
         promet = _parse_promet_table(promet_soup)
         summary = _parse_promet_summary(promet_soup)
-        invoices = _parse_racuni(promet_soup)
-        racuni_period = _parse_racuni_period(promet_soup)
+
+        # računi i period s ZADNJE stranice
+        invoices = _parse_racuni(racuni_last_soup)
+        racuni_period = _parse_racuni_period(racuni_last_soup)
 
         # poveži račune s plaćanjima
         _enrich_invoices_with_payments(invoices, promet)

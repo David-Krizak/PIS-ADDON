@@ -1,5 +1,5 @@
 name: PIS Electricity Meter
-version: "0.3.2"
+version: "0.3.3"
 slug: pis_pis_meter
 description: Scrapes mojracun.pis.com.hr (PIS) and exposes finance and consumption data via HTTP.
 arch:
