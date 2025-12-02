@@ -400,6 +400,68 @@ def _parse_racuni_period(soup: BeautifulSoup):
     return result
 
 
+def _maybe_prepend_latest_charge(promet_rows, invoices):
+    """
+    If promet shows a more recent charge than the newest scraped invoice,
+    prepend a synthetic invoice so "last invoice" always reflects the latest charge.
+    """
+    latest_charge = None
+    for row in promet_rows:
+        amount = row.get("zaduzenje_value") or 0.0
+        if amount <= 0:
+            continue
+        d_str = row.get("parsed_date")
+        if not d_str:
+            continue
+        try:
+            d = datetime.fromisoformat(d_str).date()
+        except Exception:
+            continue
+        if latest_charge is None or d > latest_charge[0]:
+            latest_charge = (d, row, amount)
+
+    if latest_charge is None:
+        return invoices
+
+    latest_date, row, amount = latest_charge
+
+    newest_invoice_date = None
+    if invoices:
+        candidate = invoices[0].get("issue_date")
+        if candidate:
+            try:
+                newest_invoice_date = datetime.fromisoformat(candidate).date()
+            except Exception:
+                newest_invoice_date = None
+
+    if newest_invoice_date and latest_date <= newest_invoice_date:
+        return invoices
+
+    synthetic_invoice = {
+        "number": row.get("Opis"),
+        "description": row.get("Opis"),
+        "issue_date": latest_date.isoformat(),
+        "issue_date_raw": row.get("Datum"),
+        "due_date": None,
+        "due_date_raw": None,
+        "place": None,
+        "partner": None,
+        "model_poziv": None,
+        "iban": None,
+        "amount_raw": row.get("Zaduženje"),
+        "amount": amount,
+        "source": "promet",
+        "synthetic": True,
+    }
+
+    logger.info(
+        "Prepending latest charge from promet (%s, %s €) ahead of invoice list",
+        synthetic_invoice.get("issue_date"),
+        synthetic_invoice.get("amount"),
+    )
+    return [synthetic_invoice] + invoices
+
+
 def _enrich_invoices_with_payments(invoices, promet_rows):
     """
     Spoji račune s prometom (zaduženja/uplate) da znamo je li račun plaćen.
@@ -434,6 +496,12 @@ def _enrich_invoices_with_payments(invoices, promet_rows):
         inv["payment_date"] = None
         inv["payment_amount"] = None
 
+        # If the invoice has no charge (0 or None), treat it as settled so it
+        # doesn't count as unpaid.
+        if amount is None or amount <= 0:
+            inv["paid"] = True
+            continue
+
         if amount is None:
             continue
 
@@ -458,13 +526,20 @@ def _enrich_invoices_with_payments(invoices, promet_rows):
         _, charge_date, _ = best_charge
 
         best_payment = None
+        best_payment_score = None
         for row, d, u in payment_rows:
-            if d and charge_date and d < charge_date:
-                continue
             if abs(u - amount) > EPS:
                 continue
-            best_payment = (row, d, u)
-            break
+
+            # Prefer payments that are closest to the charge date (can be before or after).
+            if d and charge_date:
+                score = abs((d - charge_date).days)
+            else:
+                score = 0
+
+            if best_payment is None or score < best_payment_score:
+                best_payment = (row, d, u)
+                best_payment_score = score
 
         if best_payment:
             row, d, u = best_payment
@@ -523,8 +598,15 @@ def _compute_finance_metrics(promet_rows, summary, invoices):
     if recent:
         avg_recent_bill = sum(v for _, v in recent) / len(recent)
 
+    invoice_amounts = [inv.get("amount") for inv in invoices if inv.get("amount")]
+    avg_last_six_invoices = None
+    if invoice_amounts:
+        avg_last_six_invoices = sum(invoice_amounts[:6]) / min(len(invoice_amounts), 6)
+
     # ZADNJI RAČUN – već su invoices sortirani najnovije->najstarije
-    last_invoice = invoices[0] if invoices else None
+    last_invoice = None
+    if invoices:
+        last_invoice = next((inv for inv in invoices if not inv.get("synthetic")), invoices[0])
 
     # Fallback ako nema racuna, uzmi prvo zaduženje
     if not last_invoice:
@@ -544,7 +626,11 @@ def _compute_finance_metrics(promet_rows, summary, invoices):
             }
             break
 
-    unpaid_invoices = [inv for inv in invoices if not inv.get("paid")]
+    unpaid_invoices = [
+        inv
+        for inv in invoices
+        if not inv.get("paid") and (inv.get("amount") or 0.0) > 0
+    ]
     unpaid_total = sum((inv.get("amount") or 0.0) for inv in unpaid_invoices)
     paid_invoices = [inv for inv in invoices if inv.get("paid")]
 
@@ -556,6 +642,7 @@ def _compute_finance_metrics(promet_rows, summary, invoices):
             "balance": balance,
             "status": status,
             "overpayment": overpayment_value,
+            "preplata": overpayment_value,
             "raw_summary": summary,
         },
         "last_invoice": last_invoice,
@@ -564,6 +651,7 @@ def _compute_finance_metrics(promet_rows, summary, invoices):
             "charges": year_charges,
             "payments": year_payments,
             "avg_recent_bill": avg_recent_bill,
+            "avg_last_six_invoices": avg_last_six_invoices,
         },
         "invoices": invoices,
         "unpaid_invoices_count": len(unpaid_invoices),
@@ -606,12 +694,14 @@ def _compute_consumption_metrics(readings):
         days_between = (current_date - previous_date).days
         if days_between > 0:
             avg_daily_last_period = last_period_usage / days_between
+        elif days_between == 0:
+            avg_daily_last_period = 0
 
     days_since_last_reading = None
     if current_date:
         days_since_last_reading = (today - current_date).days
 
-    PRICE_PER_KWH = 0.53
+    PRICE_PER_KWH = 0.55
     approx_last_period_cost = None
     if last_period_usage is not None:
         approx_last_period_cost = last_period_usage * PRICE_PER_KWH
@@ -675,6 +765,9 @@ def collect_pis_data(username: str, password: str) -> dict:
             key=_inv_sort_key,
             reverse=True,
         )
+
+        # Ako je u prometu novije zaduženje od zadnjeg računa, dodaj ga kao synthetic invoice.
+        all_invoices = _maybe_prepend_latest_charge(promet, all_invoices)
 
         # Spoji s promet plaćanjima
         _enrich_invoices_with_payments(all_invoices, promet)
