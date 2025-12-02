@@ -3,12 +3,14 @@ FROM ${BUILD_FROM}
 
 WORKDIR /usr/src/app
 
-# Copy your python package
-COPY pis_pis_meter/ ./pis_pis_meter/
+# Install dependencies first for better layer caching
 COPY requirements.txt .
 
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application source
+COPY . .
 
 # Fix permissions for Home Assistant
 RUN chmod -R a+rX /usr/src/app
