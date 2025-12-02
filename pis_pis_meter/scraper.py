@@ -116,10 +116,7 @@ def _fetch(session: requests.Session, url: str) -> BeautifulSoup:
 
 
 def _fetch_racuni_last_page(session: requests.Session) -> BeautifulSoup:
-    """
-    Na /Promet pronađi paginaciju u #racuni i otvori ZADNJU stranicu računa.
-    To je stranica gdje su najnoviji računi (7-9/2025 i 10/2025 u tvom primjeru).
-    """
+
     logger.info("Fetching /Promet to detect last racuni page")
     soup = _fetch(session, PROMET_URL)
 
