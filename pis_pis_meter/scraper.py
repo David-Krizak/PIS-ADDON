@@ -757,8 +757,8 @@ def collect_pis_data(username: str, password: str) -> dict:
             if racuni_period is None:
                 racuni_period = _parse_racuni_period(soup)
 
-                invs = _parse_racuni(soup)
-                all_invoices.extend(invs)
+            invs = _parse_racuni(soup)
+            all_invoices.extend(invs)
 
         # Sortiraj sve račune po datumu računa (issue_date), najnoviji prvi
         def _inv_sort_key(inv):
