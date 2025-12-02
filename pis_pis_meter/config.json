@@ -12,10 +12,14 @@
   },
   "options": {
     "username": "",
-    "password": ""
+    "password": "",
+    "cache_ttl_seconds": 86400,
+    "log_level": "INFO"
   },
   "schema": {
     "username": "str",
-    "password": "str"
+    "password": "str",
+    "cache_ttl_seconds": "int(3600,604800)",
+    "log_level": "str?"
   }
 }
