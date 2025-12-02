@@ -1,5 +1,5 @@
 name: PIS Electricity Meter
-version: "0.2.5"
+version: "0.2.6"        # bump version so it rebuilds
 slug: pis_pis_meter
 description: Scrapes mojracun.pis.com.hr (PIS) and exposes finance and consumption data via HTTP.
 arch:
@@ -10,6 +10,8 @@ arch:
   - i386
 startup: services
 boot: auto
+init: false
+
 webui: "http://[HOST]:[PORT:8080]/data"
 
 ports:
