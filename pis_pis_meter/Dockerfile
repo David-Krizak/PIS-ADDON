@@ -3,15 +3,18 @@ FROM ${BUILD_FROM}
 
 WORKDIR /usr/src/app
 
-COPY requirements.txt ./
+# Copy your python package
+COPY pis_pis_meter/ ./pis_pis_meter/
+COPY requirements.txt .
+
+# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the full add-on source so the package modules are available when running
-COPY . .
+# Fix permissions for Home Assistant
+RUN chmod -R a+rX /usr/src/app
 
-# Ensure the startup script is executable
-RUN chmod a+x /usr/src/app/run.sh
+# Start the add-on
+COPY run.sh /run.sh
+RUN chmod a+x /run.sh
 
-EXPOSE 8080
-
-CMD ["/usr/src/app/run.sh"]
+CMD [ "/run.sh" ]
