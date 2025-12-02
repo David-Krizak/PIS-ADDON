@@ -1,4 +1,4 @@
-ARG BUILD_FROM
+ARG BUILD_FROM=ghcr.io/hassio-addons/base-python/amd64:16.1.4
 FROM ${BUILD_FROM}
 
 WORKDIR /usr/src/app
@@ -10,8 +10,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Ensure the startup script is executable
-RUN chmod a+x /run.sh
+RUN chmod a+x /usr/src/app/run.sh
 
 EXPOSE 8080
 
-CMD ["/run.sh"]
+CMD ["/usr/src/app/run.sh"]
