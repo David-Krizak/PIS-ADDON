@@ -1,0 +1,21 @@
+{
+  "name": "PIS Electricity Meter",
+  "version": "0.1.0",
+  "slug": "pis_pis_meter",
+  "description": "Scrapes mojracun.pis.com.hr (PIS) and exposes finance and consumption data via HTTP.",
+  "arch": ["amd64", "armv7", "aarch64", "armhf", "i386"],
+  "startup": "services",
+  "boot": "auto",
+  "webui": "http://[HOST]:[PORT:8080]/data",
+  "ports": {
+    "8080/tcp": 8080
+  },
+  "options": {
+    "username": "",
+    "password": ""
+  },
+  "schema": {
+    "username": "str",
+    "password": "str"
+  }
+}
