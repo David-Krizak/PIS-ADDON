@@ -2,6 +2,7 @@ import json
 import re
 import logging
 from datetime import datetime, date
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -383,6 +384,67 @@ def _parse_racuni_period(soup: BeautifulSoup):
     return result
 
 
+def _find_racuni_last_page_soup(session: requests.Session, soup: BeautifulSoup) -> BeautifulSoup:
+    """
+    Gleda paginaciju u #racuni tfoot i, ako nismo na zadnjoj stranici,
+    ode na zadnju stranicu i vrati taj soup.
+
+    Ponašanje:
+      - ako nema paginacije ili ne može odlučiti -> vrati originalni soup
+      - ako je zadnja stranica već current (broj bez <a>) -> vrati originalni soup
+      - inače prati href za najveći broj stranice i vraća novi soup
+    """
+    table = soup.select_one("#racuni table.altrowstable")
+    if not table:
+        logger.debug("No racuni table found for pagination check")
+        return soup
+
+    td = table.select_one("tfoot td")
+    if not td:
+        logger.debug("No racuni pagination cell found")
+        return soup
+
+    text = td.get_text(" ", strip=True)
+    all_nums = [int(x) for x in re.findall(r"\d+", text)]
+    if not all_nums:
+        logger.debug("No numeric page numbers found in racuni pagination")
+        return soup
+
+    # page brojevi iz <a> tagova
+    anchor_nums = {}
+    for a in td.find_all("a"):
+        txt = a.get_text(strip=True)
+        if txt.isdigit():
+            n = int(txt)
+            href = a.get("href")
+            if href:
+                anchor_nums[n] = href
+
+    anchor_set = set(anchor_nums.keys())
+    current_nums = [n for n in all_nums if n not in anchor_set]
+
+    last_page_num = max(all_nums)
+    logger.debug(
+        "Racuni pagination: all_nums=%s, anchor_nums=%s, current_nums=%s, last_page_num=%s",
+        all_nums, list(anchor_nums.keys()), current_nums, last_page_num,
+    )
+
+    # ako je zadnja stranica trenutna (nema linka na nju)
+    if last_page_num in current_nums:
+        logger.info("Already on last racuni page=%s", last_page_num)
+        return soup
+
+    # ako zadnja postoji kao link, idi na nju
+    href = anchor_nums.get(last_page_num)
+    if not href:
+        logger.warning("Could not find href for last racuni page=%s", last_page_num)
+        return soup
+
+    last_url = urljoin(PROMET_URL, href)
+    logger.info("Following racuni last page=%s -> %s", last_page_num, last_url)
+    return _fetch(session, last_url)
+
+
 def _enrich_invoices_with_payments(invoices, promet_rows):
     """
     Pokuša povezati racune (iz #racuni) s prometom (zaduženja/uplate)
@@ -670,6 +732,9 @@ def _compute_consumption_metrics(readings):
 def collect_pis_data(username: str, password: str) -> dict:
     """
     Main entry: logs in, fetches / and /Promet, returns structured dict.
+
+    BITNO: za /Promet koristi se ZADNJA stranica racuna (paginated #racuni),
+    tako da uvijek radiš s novijim računima.
     """
     logger.info("collect_pis_data: starting scrape for PIS portal")
     with requests.Session() as session:
@@ -677,7 +742,11 @@ def collect_pis_data(username: str, password: str) -> dict:
         _login(session, username, password)
 
         root_soup = _fetch(session, ROOT_URL)
-        promet_soup = _fetch(session, PROMET_URL)
+
+        # prvo dovući neku /Promet stranicu
+        first_promet_soup = _fetch(session, PROMET_URL)
+        # pa onda, ako treba, skočiti na zadnju stranicu racuna
+        promet_soup = _find_racuni_last_page_soup(session, first_promet_soup)
 
         readings = _parse_root_readings(root_soup)
         promet = _parse_promet_table(promet_soup)
