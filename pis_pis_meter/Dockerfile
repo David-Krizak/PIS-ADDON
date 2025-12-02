@@ -6,9 +6,10 @@ WORKDIR /usr/src/app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY scraper.py app.py ./
+# Copy the full add-on source so the package modules are available when running
+COPY . .
 
-COPY run.sh /run.sh
+# Ensure the startup script is executable
 RUN chmod a+x /run.sh
 
 EXPOSE 8080
