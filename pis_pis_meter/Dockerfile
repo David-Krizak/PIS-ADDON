@@ -3,19 +3,16 @@ FROM ${BUILD_FROM}
 
 WORKDIR /usr/src/app
 
-# Install dependencies first for better layer caching
 COPY requirements.txt .
-
-# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source
 COPY . .
 
-# Fix permissions for Home Assistant
 RUN chmod -R a+rX /usr/src/app
 
-# Start the add-on
+# >>> add this line <<<
+ENV PYTHONPATH=/usr/src/app
+
 COPY run.sh /run.sh
 RUN chmod a+x /run.sh
 
