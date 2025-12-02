@@ -1,36 +1,11 @@
-# PIS Electricity Meter Home Assistant Add-on
+# Example Home Assistant config for the simplified PIS add-on payload
+# Drop this into your configuration.yaml (adjust host/port as needed).
 
-This repository contains a Home Assistant add-on that logs into the PIS portal (`mojracun.pis.com.hr`), scrapes finance and consumption data, and exposes it via a small Flask API.
-
-## Repository structure
-- `repository.json`: metadata so Home Assistant can register this as a custom add-on repository.
-- `pis_pis_meter/`: add-on folder with `config.json`, `Dockerfile`, and Python sources (`app.py`, `scraper.py`).
-
-## Installation in Home Assistant
-1. In **Settings → Add-ons → Add-on store**, open the menu (⋮) and choose **Repositories**.
-2. Add this repository URL: `https://github.com/David-Krizak/PIS-ADDON`.
-3. After the repository refreshes, install **PIS Electricity Meter** from the list.
-4. Open the add-on and set the **username** and **password** options (required for logging into the PIS portal).
-5. Start the add-on. The API is available at `http://<home-assistant-host>:8080/data` and the log viewer at `/logs`.
-6. A lightweight health check is available at `/health`.
-
-## Current functionality
-- Logs into the PIS portal with the provided credentials.
-- Scrapes meter readings, invoices, and yearly finance data.
-- Computes basic metrics like last-period usage, average daily usage, and balance status.
-- Exposes all data as JSON at the `/data` endpoint, including cache metadata, optional force-refresh via `?refresh=true`, and status indicators for degraded responses when the scraper falls back to cached data.
-- Includes an add-on log viewer at `/logs` and a health check at `/health`.
-
-## Home Assistant template example (simplified parser)
-Use the `rest` integration to pull `http://<home-assistant-host>:8080/data` into `sensor.pis_portal`, then create a handful of template sensors that surface only the streamlined fields (outstanding balance, unpaid counts, latest invoice, usage, and estimated cost at €0.55 per unit):
-
-```yaml
-# configuration.yaml
 rest:
   - resource: http://127.0.0.1:8080/data
     method: GET
     timeout: 30
-    scan_interval: 3600
+    scan_interval: 3600  # once per hour; the add-on caches for a day by default
     verify_ssl: false
     name: pis_portal
     value_template: "{{ value_json.status.state }}"
@@ -40,8 +15,11 @@ rest:
       - period
       - cache
 
+# Template sensors that read from sensor.pis_portal attributes
+
 template:
   - sensor:
+      # Is there anything outstanding and how much?
       - name: "PIS stanje"
         unique_id: pis_finance_status
         icon: mdi:scale-balance
@@ -61,6 +39,7 @@ template:
             {% set unpaid = finance.get('unpaid') or {} %}
             {{ unpaid.get('total') | float(0) | round(2) }}
 
+      # Latest invoice basics
       - name: "PIS zadnji račun iznos"
         unique_id: pis_last_invoice_amount
         icon: mdi:receipt-text
@@ -71,7 +50,8 @@ template:
           {{ invoice.get('amount') | float(0) | round(2) }}
         attributes:
           broj: >
-            {% set invoice = (state_attr('sensor.pis_portal', 'finance') or {}).get('latest_invoice') or {} %}
+            {% set finance = state_attr('sensor.pis_portal', 'finance') or {} %}
+            {% set invoice = finance.get('latest_invoice') or {} %}
             {{ invoice.get('number') }}
           datum_izdavanja: >
             {% set invoice = (state_attr('sensor.pis_portal', 'finance') or {}).get('latest_invoice') or {} %}
@@ -80,10 +60,11 @@ template:
             {% set invoice = (state_attr('sensor.pis_portal', 'finance') or {}).get('latest_invoice') or {} %}
             {{ invoice.get('due_date') or invoice.get('due_date_raw') }}
 
+      # Usage and approximate cost (gas used * 0.55)
       - name: "PIS potrošnja zadnje razdoblje"
         unique_id: pis_usage_last_period
         icon: mdi:fire
-        unit_of_measurement: "m³"
+        unit_of_measurement: "m³"  # adjust if your portal uses kWh instead
         state: >
           {% set consumption = state_attr('sensor.pis_portal', 'consumption') or {} %}
           {{ consumption.get('usage') | float(0) | round(2) }}
@@ -100,16 +81,3 @@ template:
           iznos_procijenjen: >
             {% set consumption = state_attr('sensor.pis_portal', 'consumption') or {} %}
             {{ consumption.get('approx_last_period_cost') | float(0) | round(2) }}
-```
-
-An expanded YAML sample lives in [`examples/home_assistant_config.yaml`](examples/home_assistant_config.yaml) if you prefer to copy/paste.
-
-## Suggestions for further improvement
-- **Home Assistant sensors:** Publish balance/usage as native sensors via the Supervisor API instead of polling JSON directly.
-- **Ingress/UI:** Add an ingress-enabled dashboard to visualize invoices, trends, and errors inside Home Assistant.
-- **Testing & CI:** Add unit tests around the scraper parsing functions and a lint pipeline to catch regressions.
-
-## New configuration options
-- `cache_ttl_seconds` (default: 86400 — once per day, min 3600, max 604800): Cache scraped data to avoid hammering the portal; set `?refresh=true` on `/data` to bypass.
-- `log_level` (default: `INFO`): Adjust logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
-
