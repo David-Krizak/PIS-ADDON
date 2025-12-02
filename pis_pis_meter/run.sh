@@ -3,4 +3,4 @@ set -e
 
 echo "[INFO] Starting PIS Electricity Meter add-on"
 
-python /usr/src/app/app.py
+python -m pis_pis_meter.app

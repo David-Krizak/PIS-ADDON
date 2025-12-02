@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 
 from flask import Flask, Response, jsonify, request
 
-from scraper import collect_pis_data
+from .scraper import collect_pis_data
 
 LOG_PATH = "/data/pis_pis_meter.log"
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
