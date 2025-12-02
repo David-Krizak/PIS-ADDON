@@ -1,6 +1,6 @@
 {
   "name": "PIS Electricity Meter",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "slug": "pis_pis_meter",
   "description": "Scrapes mojracun.pis.com.hr (PIS) and exposes finance and consumption data via HTTP with built-in log viewer.",
   "arch": ["amd64", "armv7", "aarch64", "armhf", "i386"],
