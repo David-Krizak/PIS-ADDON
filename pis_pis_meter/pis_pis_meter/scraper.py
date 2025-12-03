@@ -14,8 +14,8 @@ from .parser import (
     parse_racuni_period,
     parse_root_readings,
     parse_monthly_usage,
+    parse_sifra_pm,
 )
-
 
 logger = logging.getLogger("pis-addon.scraper")
 
@@ -25,6 +25,21 @@ def _close_session(session: requests.Session) -> None:
         session.close()
     except Exception:
         logger.debug("Session close failed", exc_info=True)
+
+
+def _fetch_monthly_usage(session: requests.Session, sifra_pm: str):
+    """Pozovi Ocitanja/GetChartDataColumn i vrati parsirani monthly_usage dict."""
+    url = "https://mojracun.pis.com.hr/Ocitanja/GetChartDataColumn"
+    resp = session.get(url, params={"sifra": sifra_pm})
+    resp.raise_for_status()
+
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.warning("Failed to decode monthly usage JSON")
+        return None
+
+    return parse_monthly_usage(data)
 
 
 def collect_pis_data(username: str, password: str) -> dict:
@@ -44,9 +59,17 @@ def collect_pis_data(username: str, password: str) -> dict:
             len(racuni_pages),
         )
 
+        # očitanja s root stranice
         readings = parse_root_readings(root_soup)
-        monthly_usage = parse_monthly_usage(root_soup)  # <-- OVDJE PARSIRAŠ
 
+        # Sifra prodajnog mjesta + monthly usage JSON
+        sifra_pm = parse_sifra_pm(root_soup)
+        if sifra_pm:
+            monthly_usage = _fetch_monthly_usage(session, sifra_pm)
+        else:
+            monthly_usage = None
+
+        # promet / financije
         promet_rows = parse_promet_table(promet_soup)
         summary = parse_promet_summary(promet_soup)
 
@@ -64,9 +87,8 @@ def collect_pis_data(username: str, password: str) -> dict:
             summary=summary,
             invoices=invoices,
             racuni_period=racuni_period,
-            monthly_usage=monthly_usage,  # <-- PROSLIJEDI GA
+            monthly_usage=monthly_usage,
         )
-
         logger.info(
             "collect_pis_data: done. readings=%s, promet_rows=%s, invoices=%s",
             len(readings),
@@ -81,7 +103,10 @@ def collect_pis_data(username: str, password: str) -> dict:
 if __name__ == "__main__":
     import os
 
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     username = os.getenv("PIS_USERNAME")
     password = os.getenv("PIS_PASSWORD")
     if not username or not password:

@@ -8,6 +8,8 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger("pis-addon.parser")
 
 # ---------- primitive parsers ----------
+
+
 def _classify_tx(desc: Optional[str]) -> str:
     """Rough classification of Promet row based on description."""
     if not desc:
@@ -20,75 +22,6 @@ def _classify_tx(desc: Optional[str]) -> str:
     if d.startswith("rn "):
         return "payment"
     return "other"
-def parse_monthly_usage(soup: BeautifulSoup):
-    """Parse hidden monthly usage table from ocitanja_brojila / columnchart_div.
-
-    Vraća dict oblika:
-    {
-        "2023": [jan, feb, ..., dec],
-        "2024": [...],
-        "2025": [...]
-    }
-    """
-
-    table = soup.select_one("#ocitanja_brojila table")
-    if not table:
-        logger.warning("Could not find monthly usage table in #ocitanja_brojila")
-        return None
-
-    # Header: Mjesec, 2023, 2024, 2025
-    header_cells = [th.get_text(strip=True) for th in table.select("thead tr th")]
-    if len(header_cells) < 2:
-        logger.warning("Monthly usage table header too short: %r", header_cells)
-        return None
-
-    years: List[int] = []
-    for h in header_cells[1:]:
-        try:
-            years.append(int(h))
-        except ValueError:
-            logger.debug("Skipping non-year header cell in monthly usage: %r", h)
-
-    if not years:
-        logger.warning("No valid years found in monthly usage header")
-        return None
-
-    # Pre-fill s 0 za 12 mjeseci po godini
-    monthly: Dict[str, List[int]] = {str(y): [0] * 12 for y in years}
-
-    month_map = {
-        "sij": 1, "vlj": 2, "ožu": 3, "ožuj": 3,
-        "tra": 4, "svi": 5, "lip": 6,
-        "srp": 7, "kol": 8, "ruj": 9,
-        "lis": 10, "stu": 11, "pro": 12,
-    }
-
-    tbody_rows = table.select("tbody tr")
-    for tr in tbody_rows:
-        tds = tr.find_all("td")
-        if len(tds) < 2:
-            continue
-
-        month_label = tds[0].get_text(strip=True).lower()
-        month_num = month_map.get(month_label)
-        if not month_num:
-            logger.debug("Unknown month label in monthly usage: %r", month_label)
-            continue
-
-        idx = month_num - 1  # 0-based index
-
-        # Za svaki year, uzmi odgovarajući stupac
-        for i, year in enumerate(years, start=1):
-            if i >= len(tds):
-                break
-            val_text = tds[i].get_text(strip=True)
-            val = _parse_int_reading(val_text)
-            if val is None:
-                val = 0
-            monthly[str(year)][idx] = val
-
-    logger.info("Parsed monthly usage for years: %s", list(monthly.keys()))
-    return monthly
 
 
 def _parse_euro_amount(text: str):
@@ -165,18 +98,30 @@ def _parse_hr_date(text: str):
 
     # Genitive + nominative forms
     MONTHS = {
-        "siječanj": 1, "siječnja": 1,
-        "veljača": 2, "veljače": 2,
-        "ožujak": 3, "ožujka": 3,
-        "travanj": 4, "travnja": 4,
-        "svibanj": 5, "svibnja": 5,
-        "lipanj": 6, "lipnja": 6,
-        "srpanj": 7, "srpnja": 7,
-        "kolovoz": 8, "kolovoza": 8,
-        "rujan": 9, "rujna": 9,
-        "listopad": 10, "listopada": 10,
-        "studeni": 11, "studenog": 11,
-        "prosinac": 12, "prosinca": 12,
+        "siječanj": 1,
+        "siječnja": 1,
+        "veljača": 2,
+        "veljače": 2,
+        "ožujak": 3,
+        "ožujka": 3,
+        "travanj": 4,
+        "travnja": 4,
+        "svibanj": 5,
+        "svibnja": 5,
+        "lipanj": 6,
+        "lipnja": 6,
+        "srpanj": 7,
+        "srpnja": 7,
+        "kolovoz": 8,
+        "kolovoza": 8,
+        "rujan": 9,
+        "rujna": 9,
+        "listopad": 10,
+        "listopada": 10,
+        "studeni": 11,
+        "studenog": 11,
+        "prosinac": 12,
+        "prosinca": 12,
     }
 
     month = MONTHS.get(month_word)
@@ -189,6 +134,81 @@ def _parse_hr_date(text: str):
     except ValueError:
         logger.debug("Invalid date components from %r", text)
         return None
+
+
+# ---------- extra helpers for monthly usage ----------
+
+
+def parse_sifra_pm(soup: BeautifulSoup) -> Optional[str]:
+    """Izvuci SifraProdajnogMjesta iz root stranice."""
+    el = soup.select_one("#SifraProdajnogMjesta")
+    if not el:
+        logger.warning("Could not find hidden input SifraProdajnogMjesta")
+        return None
+    val = el.get("value")
+    if not val:
+        logger.warning("Hidden input SifraProdajnogMjesta has no value")
+        return None
+    return val
+
+
+def parse_monthly_usage(data) -> Optional[Dict[str, List[int]]]:
+    """Parsaj JSON sa Ocitanja/GetChartDataColumn u monthly_usage dict.
+
+    Očekivani format (po njihovom JS-u):
+      data[i].Item1 = oznaka mjeseca (sij, vlj, ožu,...)
+      data[i].Item2 = [godina_-2, godina_-1, godina_0] potrošnje
+    """
+
+    if not data:
+        logger.warning("Monthly usage JSON is empty or None")
+        return None
+
+    current_year = date.today().year
+    years = [current_year - 2, current_year - 1, current_year]
+
+    # Pre-fill sa 0 za 12 mjeseci po godini
+    monthly: Dict[str, List[int]] = {str(y): [0] * 12 for y in years}
+
+    month_map = {
+        "sij": 1,
+        "vlj": 2,
+        "ožu": 3,
+        "ožuj": 3,
+        "tra": 4,
+        "svi": 5,
+        "lip": 6,
+        "srp": 7,
+        "kol": 8,
+        "ruj": 9,
+        "lis": 10,
+        "stu": 11,
+        "pro": 12,
+    }
+
+    for row in data:
+        label = str(row.get("Item1", "")).strip().lower()
+        month_num = month_map.get(label)
+        if not month_num:
+            logger.debug("Unknown month label in monthly usage JSON: %r", label)
+            continue
+
+        idx = month_num - 1  # 0-based index
+        vals = row.get("Item2") or []
+
+        # do 3 zadnje godine
+        for j in range(3):
+            if j >= len(vals):
+                val = 0
+            else:
+                try:
+                    val = int(vals[j] or 0)
+                except (ValueError, TypeError):
+                    val = 0
+            monthly[str(years[j])][idx] = val
+
+    logger.info("Parsed monthly usage for years: %s", list(monthly.keys()))
+    return monthly
 
 
 # ---------- HTML parsing ----------
@@ -222,6 +242,7 @@ def parse_root_readings(soup: BeautifulSoup):
 
     logger.info("Parsed %s readings from root page", len(readings))
     return readings
+
 
 def parse_promet_table(soup: BeautifulSoup):
     """Extract charges/payments table to gauge current balance."""
@@ -292,11 +313,7 @@ def parse_promet_summary(soup: BeautifulSoup):
 
 
 def parse_racuni(soup: BeautifulSoup):
-    """Collect minimal invoice details (number, dates, amount) from racuni section.
-
-    NOTE: For latest invoice we now primarily trust the Promet table. This parser
-    is kept for compatibility / future use.
-    """
+    """Collect minimal invoice details (number, dates, amount) from racuni section."""
 
     invoices = []
     table = soup.select_one("#racuni table.altrowstable")
@@ -372,13 +389,18 @@ def parse_racuni_period(soup: BeautifulSoup):
 
 # ---------- data shaping ----------
 
+
 def _compute_finance(readings, promet_rows, promet_summary, invoices):
     """Return what the UI needs: balance, last bill, last payment."""
 
-    previous_debt = promet_summary.get("Dug iz prethodnog razdoblja", {}).get("value") or 0.0
+    previous_debt = (
+        promet_summary.get("Dug iz prethodnog razdoblja", {}).get("value") or 0.0
+    )
     charges_total = promet_summary.get("Ukupno zaduženje", {}).get("value") or 0.0
     payments_total = promet_summary.get("Ukupna uplata", {}).get("value") or 0.0
-    overpayment = promet_summary.get("U preplati ste u iznosu od", {}).get("value") or 0.0
+    overpayment = (
+        promet_summary.get("U preplati ste u iznosu od", {}).get("value") or 0.0
+    )
 
     outstanding = previous_debt + charges_total - payments_total
 
@@ -405,7 +427,9 @@ def _compute_finance(readings, promet_rows, promet_summary, invoices):
     if latest_bill_row:
         # for bills, the amount sits in "payment" column (your HTML)
         amount_val = latest_bill_row.get("payment") or latest_bill_row.get("charge")
-        amount_raw = latest_bill_row.get("payment_raw") or latest_bill_row.get("charge_raw")
+        amount_raw = (
+            latest_bill_row.get("payment_raw") or latest_bill_row.get("charge_raw")
+        )
         if amount_val is not None:
             amount_val = round(float(amount_val), 2)
 
@@ -563,15 +587,12 @@ def _compute_consumption(readings, monthly_usage=None):
         "year_usage": year_usage,
         "year_period_start": year_start.isoformat() if year_start else None,
         "year_period_end": year_end.isoformat() if year_end else None,
-        "monthly_usage": monthly_usage,  # novo polje
+        "monthly_usage": monthly_usage,
     }
 
 
 # ---------- public API ----------
 
-
-
-# ---------- public API ----------
 
 def build_portal_payload(
     readings,
@@ -586,7 +607,7 @@ def build_portal_payload(
     promet_rows    - redovi iz Promet tablice
     summary        - sažetak financija (div.summary)
     invoices       - računi iz /Promet -> racuni sekcije
-    racuni_period  - period računa (tekst gore "Prikazuju se računi za period...")
+    racuni_period  - period računa
     monthly_usage  - dict godina -> [12 mjesečnih potrošnji] ili None
     """
     finance = _compute_finance(readings, promet_rows, summary, invoices)
