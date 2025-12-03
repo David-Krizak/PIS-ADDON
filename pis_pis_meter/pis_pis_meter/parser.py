@@ -196,17 +196,6 @@ def _parse_hr_date(text: str):
 
 def parse_root_readings(soup: BeautifulSoup):
     """Read the last few meter values from the landing page."""
-    readings = parse_root_readings(root_soup)
-    monthly_usage = parse_monthly_usage(root_soup)
-
-    payload = build_portal_payload(
-        readings=readings,
-        promet_rows=promet_rows,
-        summary=promet_summary,
-        invoices=invoices,
-        racuni_period=racuni_period,
-        monthly_usage=monthly_usage,
-    )
 
     table = soup.select_one("#stranicenje table.altrowstable")
     if not table:
@@ -233,7 +222,6 @@ def parse_root_readings(soup: BeautifulSoup):
 
     logger.info("Parsed %s readings from root page", len(readings))
     return readings
-
 
 def parse_promet_table(soup: BeautifulSoup):
     """Extract charges/payments table to gauge current balance."""
