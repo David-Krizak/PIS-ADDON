@@ -456,7 +456,102 @@ def _compute_finance(readings, promet_rows, promet_summary, invoices):
 
 def _compute_consumption(readings, monthly_usage=None):
     """Use readings to estimate last period usage, price and yearly total."""
-    ...
+
+    today = date.today()
+
+    # zadnje očitanje i prethodno
+    current = readings[0] if len(readings) >= 1 else None
+    previous = readings[1] if len(readings) >= 2 else None
+
+    current_value = current.get("value") if current else None
+    previous_value = previous.get("value") if previous else None
+
+    current_date = (
+        datetime.fromisoformat(current["date"]).date()
+        if current and current.get("date")
+        else None
+    )
+    previous_date = (
+        datetime.fromisoformat(previous["date"]).date()
+        if previous and previous.get("date")
+        else None
+    )
+
+    usage = None
+    days_between = None
+    avg_daily = None
+
+    # osnovna logika za zadnji period
+    if (
+        current_value is not None
+        and previous_value is not None
+        and current_date
+        and previous_date
+    ):
+        usage = current_value - previous_value
+        if usage < 0:
+            logger.debug(
+                "Current reading (%s) lower than previous (%s); ignoring usage",
+                current_value,
+                previous_value,
+            )
+            usage = None
+        else:
+            days_between = (current_date - previous_date).days
+            if days_between > 0:
+                avg_daily = usage / days_between
+            elif days_between == 0:
+                avg_daily = 0.0
+
+    days_since_last = None
+    if current_date:
+        days_since_last = (today - current_date).days
+
+    PRICE_PER_KWH = 0.55
+    approx_cost = usage * PRICE_PER_KWH if usage is not None else None
+
+    # --- godišnja potrošnja iz očitanja iste godine kao zadnje ---
+    year_usage = None
+    year_start = None
+    year_end = None
+
+    dated_readings = []
+    for r in readings:
+        d_iso = r.get("date")
+        v = r.get("value")
+        if not d_iso or v is None:
+            continue
+        try:
+            d_obj = datetime.fromisoformat(d_iso).date()
+        except ValueError:
+            continue
+        dated_readings.append((d_obj, v))
+
+    if dated_readings:
+        dated_readings.sort(key=lambda x: x[0])
+        target_year = dated_readings[-1][0].year
+        year_readings = [(d, v) for (d, v) in dated_readings if d.year == target_year]
+
+        if len(year_readings) >= 2:
+            year_start = year_readings[0][0]
+            year_end = year_readings[-1][0]
+            total = 0
+            last_v = year_readings[0][1]
+            for (d, v) in year_readings[1:]:
+                diff = v - last_v
+                if diff > 0:
+                    total += diff
+                last_v = v
+            year_usage = total
+
+    # zaokruživanje / čišćenje
+    if approx_cost is not None:
+        approx_cost = round(approx_cost, 2)
+    if avg_daily is not None:
+        avg_daily = round(avg_daily, 3)
+    if year_usage is not None:
+        year_usage = int(round(year_usage))
+
     return {
         "last_reading": current,
         "previous_reading": previous,
@@ -468,12 +563,13 @@ def _compute_consumption(readings, monthly_usage=None):
         "year_usage": year_usage,
         "year_period_start": year_start.isoformat() if year_start else None,
         "year_period_end": year_end.isoformat() if year_end else None,
-        "monthly_usage": monthly_usage,  # <-- NOVO
+        "monthly_usage": monthly_usage,  # novo polje
     }
 
 
 # ---------- public API ----------
 
+monthly_usage = parse_monthly_usage(root_soup)
 
 def build_portal_payload(
     readings,
@@ -481,7 +577,7 @@ def build_portal_payload(
     summary,
     invoices,
     racuni_period,
-    monthly_usage=None,
+    monthly_usage=monthly_usage,
 ):
     finance = _compute_finance(readings, promet_rows, summary, invoices)
     consumption = _compute_consumption(readings, monthly_usage)
