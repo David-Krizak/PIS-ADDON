@@ -556,7 +556,7 @@ def _compute_consumption(readings):
         year_usage = int(round(year_usage))
 
     # MJSEČNA POTROŠNJA IZ OČITANJA (zadnje 3 godine)
-    monthly_usage = _build_monthly_usage_last_years(readings, years_back=6)
+    monthly_usage = _build_monthly_usage_last_years(readings, years_back=3)
 
     return {
         "last_reading": current,
