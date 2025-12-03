@@ -1,5 +1,5 @@
 name: PIS Electricity Meter
-version: "0.3.12"
+version: "0.3.13"
 slug: pis_pis_meter
 description: Scrapes PIS and shows you data.
 arch:
