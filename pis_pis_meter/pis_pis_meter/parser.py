@@ -20,6 +20,75 @@ def _classify_tx(desc: Optional[str]) -> str:
     if d.startswith("rn "):
         return "payment"
     return "other"
+def parse_monthly_usage(soup: BeautifulSoup):
+    """Parse hidden monthly usage table from ocitanja_brojila / columnchart_div.
+
+    Vraća dict oblika:
+    {
+        "2023": [jan, feb, ..., dec],
+        "2024": [...],
+        "2025": [...]
+    }
+    """
+
+    table = soup.select_one("#ocitanja_brojila table")
+    if not table:
+        logger.warning("Could not find monthly usage table in #ocitanja_brojila")
+        return None
+
+    # Header: Mjesec, 2023, 2024, 2025
+    header_cells = [th.get_text(strip=True) for th in table.select("thead tr th")]
+    if len(header_cells) < 2:
+        logger.warning("Monthly usage table header too short: %r", header_cells)
+        return None
+
+    years: List[int] = []
+    for h in header_cells[1:]:
+        try:
+            years.append(int(h))
+        except ValueError:
+            logger.debug("Skipping non-year header cell in monthly usage: %r", h)
+
+    if not years:
+        logger.warning("No valid years found in monthly usage header")
+        return None
+
+    # Pre-fill s 0 za 12 mjeseci po godini
+    monthly: Dict[str, List[int]] = {str(y): [0] * 12 for y in years}
+
+    month_map = {
+        "sij": 1, "vlj": 2, "ožu": 3, "ožuj": 3,
+        "tra": 4, "svi": 5, "lip": 6,
+        "srp": 7, "kol": 8, "ruj": 9,
+        "lis": 10, "stu": 11, "pro": 12,
+    }
+
+    tbody_rows = table.select("tbody tr")
+    for tr in tbody_rows:
+        tds = tr.find_all("td")
+        if len(tds) < 2:
+            continue
+
+        month_label = tds[0].get_text(strip=True).lower()
+        month_num = month_map.get(month_label)
+        if not month_num:
+            logger.debug("Unknown month label in monthly usage: %r", month_label)
+            continue
+
+        idx = month_num - 1  # 0-based index
+
+        # Za svaki year, uzmi odgovarajući stupac
+        for i, year in enumerate(years, start=1):
+            if i >= len(tds):
+                break
+            val_text = tds[i].get_text(strip=True)
+            val = _parse_int_reading(val_text)
+            if val is None:
+                val = 0
+            monthly[str(year)][idx] = val
+
+    logger.info("Parsed monthly usage for years: %s", list(monthly.keys()))
+    return monthly
 
 
 def _parse_euro_amount(text: str):
@@ -127,6 +196,17 @@ def _parse_hr_date(text: str):
 
 def parse_root_readings(soup: BeautifulSoup):
     """Read the last few meter values from the landing page."""
+    readings = parse_root_readings(root_soup)
+    monthly_usage = parse_monthly_usage(root_soup)
+
+    payload = build_portal_payload(
+        readings=readings,
+        promet_rows=promet_rows,
+        summary=promet_summary,
+        invoices=invoices,
+        racuni_period=racuni_period,
+        monthly_usage=monthly_usage,
+    )
 
     table = soup.select_one("#stranicenje table.altrowstable")
     if not table:
@@ -386,102 +466,9 @@ def _compute_finance(readings, promet_rows, promet_summary, invoices):
     return finance
 
 
-def _compute_consumption(readings):
+def _compute_consumption(readings, monthly_usage=None):
     """Use readings to estimate last period usage, price and yearly total."""
-
-    today = date.today()
-
-    current = readings[0] if len(readings) >= 1 else None
-    previous = readings[1] if len(readings) >= 2 else None
-
-    current_value = current.get("value") if current else None
-    previous_value = previous.get("value") if previous else None
-
-    current_date = (
-        datetime.fromisoformat(current["date"]).date()
-        if current and current.get("date")
-        else None
-    )
-    previous_date = (
-        datetime.fromisoformat(previous["date"]).date()
-        if previous and previous.get("date")
-        else None
-    )
-
-    usage = None
-    days_between = None
-    avg_daily = None
-
-    if (
-        current_value is not None
-        and previous_value is not None
-        and current_date
-        and previous_date
-    ):
-        usage = current_value - previous_value
-        if usage < 0:
-            logger.debug(
-                "Current reading (%s) lower than previous (%s); ignoring usage",
-                current_value,
-                previous_value,
-            )
-            usage = None
-        else:
-            days_between = (current_date - previous_date).days
-            if days_between > 0:
-                avg_daily = usage / days_between
-            elif days_between == 0:
-                avg_daily = 0.0
-
-    days_since_last = None
-    if current_date:
-        days_since_last = (today - current_date).days
-
-    PRICE_PER_KWH = 0.55
-    approx_cost = usage * PRICE_PER_KWH if usage is not None else None
-
-    # --- yearly total from readings in same year as latest ---
-    year_usage = None
-    year_start = None
-    year_end = None
-
-    dated_readings = []
-    for r in readings:
-        d_iso = r.get("date")
-        v = r.get("value")
-        if not d_iso or v is None:
-            continue
-        try:
-            d_obj = datetime.fromisoformat(d_iso).date()
-        except ValueError:
-            continue
-        dated_readings.append((d_obj, v))
-
-    if dated_readings:
-        dated_readings.sort(key=lambda x: x[0])
-        target_year = dated_readings[-1][0].year
-        year_readings = [(d, v) for (d, v) in dated_readings if d.year == target_year]
-
-        if len(year_readings) >= 2:
-            year_start = year_readings[0][0]
-            year_end = year_readings[-1][0]
-            total = 0
-            last_v = year_readings[0][1]
-            for (d, v) in year_readings[1:]:
-                diff = v - last_v
-                if diff > 0:
-                    total += diff
-                last_v = v
-            year_usage = total
-
-    # rounding / cleaning
-    if approx_cost is not None:
-        approx_cost = round(approx_cost, 2)
-    if avg_daily is not None:
-        avg_daily = round(avg_daily, 3)
-    if year_usage is not None:
-        year_usage = int(round(year_usage))
-
+    ...
     return {
         "last_reading": current,
         "previous_reading": previous,
@@ -493,15 +480,23 @@ def _compute_consumption(readings):
         "year_usage": year_usage,
         "year_period_start": year_start.isoformat() if year_start else None,
         "year_period_end": year_end.isoformat() if year_end else None,
+        "monthly_usage": monthly_usage,  # <-- NOVO
     }
 
 
 # ---------- public API ----------
 
 
-def build_portal_payload(readings, promet_rows, summary, invoices, racuni_period):
+def build_portal_payload(
+    readings,
+    promet_rows,
+    summary,
+    invoices,
+    racuni_period,
+    monthly_usage=None,
+):
     finance = _compute_finance(readings, promet_rows, summary, invoices)
-    consumption = _compute_consumption(readings)
+    consumption = _compute_consumption(readings, monthly_usage)
 
     return {
         "finance": finance,
