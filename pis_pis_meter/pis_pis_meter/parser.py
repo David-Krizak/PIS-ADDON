@@ -136,81 +136,6 @@ def _parse_hr_date(text: str):
         return None
 
 
-# ---------- extra helpers for monthly usage ----------
-
-
-def parse_sifra_pm(soup: BeautifulSoup) -> Optional[str]:
-    """Izvuci SifraProdajnogMjesta iz root stranice."""
-    el = soup.select_one("#SifraProdajnogMjesta")
-    if not el:
-        logger.warning("Could not find hidden input SifraProdajnogMjesta")
-        return None
-    val = el.get("value")
-    if not val:
-        logger.warning("Hidden input SifraProdajnogMjesta has no value")
-        return None
-    return val
-
-
-def parse_monthly_usage(data) -> Optional[Dict[str, List[int]]]:
-    """Parsaj JSON sa Ocitanja/GetChartDataColumn u monthly_usage dict.
-
-    Očekivani format (po njihovom JS-u):
-      data[i].Item1 = oznaka mjeseca (sij, vlj, ožu,...)
-      data[i].Item2 = [godina_-2, godina_-1, godina_0] potrošnje
-    """
-
-    if not data:
-        logger.warning("Monthly usage JSON is empty or None")
-        return None
-
-    current_year = date.today().year
-    years = [current_year - 2, current_year - 1, current_year]
-
-    # Pre-fill sa 0 za 12 mjeseci po godini
-    monthly: Dict[str, List[int]] = {str(y): [0] * 12 for y in years}
-
-    month_map = {
-        "sij": 1,
-        "vlj": 2,
-        "ožu": 3,
-        "ožuj": 3,
-        "tra": 4,
-        "svi": 5,
-        "lip": 6,
-        "srp": 7,
-        "kol": 8,
-        "ruj": 9,
-        "lis": 10,
-        "stu": 11,
-        "pro": 12,
-    }
-
-    for row in data:
-        label = str(row.get("Item1", "")).strip().lower()
-        month_num = month_map.get(label)
-        if not month_num:
-            logger.debug("Unknown month label in monthly usage JSON: %r", label)
-            continue
-
-        idx = month_num - 1  # 0-based index
-        vals = row.get("Item2") or []
-
-        # do 3 zadnje godine
-        for j in range(3):
-            if j >= len(vals):
-                val = 0
-            else:
-                try:
-                    val = int(vals[j] or 0)
-                except (ValueError, TypeError):
-                    val = 0
-            monthly[str(years[j])][idx] = val
-
-    logger.info("Parsed monthly usage for years: %s", list(monthly.keys()))
-    return monthly
-
-
 # ---------- HTML parsing ----------
 
 
@@ -387,6 +312,60 @@ def parse_racuni_period(soup: BeautifulSoup):
     return result
 
 
+# ---------- helpers za potrošnju po mjesecima ----------
+
+
+def _build_monthly_usage_last_years(readings, years_back: int = 3) -> Dict[str, List[int]]:
+    """
+    Izračunaj mjesečnu potrošnju po godinama iz SIROVIH očitanja brojila.
+
+    Ideja:
+      - sortiraš očitanja po datumu
+      - za svaki par (prev, curr) radiš diff = curr.value - prev.value (ako > 0)
+      - diff pripišeš mjesecu i godini curr datuma
+      - uzimaš samo zadnjih `years_back` godina
+    """
+    dated = []
+    for r in readings:
+        d_iso = r.get("date")
+        v = r.get("value")
+        if not d_iso or v is None:
+            continue
+        try:
+            d_obj = datetime.fromisoformat(d_iso).date()
+        except ValueError:
+            continue
+        dated.append((d_obj, v))
+
+    if not dated:
+        return {}
+
+    # sortiraj po datumu (staro -> novo)
+    dated.sort(key=lambda x: x[0])
+
+    latest_year = dated[-1][0].year
+    years = [latest_year - i for i in reversed(range(years_back))]
+    monthly: Dict[str, List[int]] = {str(y): [0] * 12 for y in years}
+
+    for i in range(1, len(dated)):
+        prev_date, prev_val = dated[i - 1]
+        curr_date, curr_val = dated[i]
+
+        diff = curr_val - prev_val
+        if diff <= 0:
+            continue  # ignoriraj gluposti ili reset
+
+        y = curr_date.year
+        m = curr_date.month
+        if y in years:
+            monthly[str(y)][m - 1] += diff
+
+    logger.info(
+        "Computed monthly usage from readings for years: %s", list(monthly.keys())
+    )
+    return monthly
+
+
 # ---------- data shaping ----------
 
 
@@ -478,7 +457,7 @@ def _compute_finance(readings, promet_rows, promet_summary, invoices):
     return finance
 
 
-def _compute_consumption(readings, monthly_usage=None):
+def _compute_consumption(readings):
     """Use readings to estimate last period usage, price and yearly total."""
 
     today = date.today()
@@ -576,6 +555,9 @@ def _compute_consumption(readings, monthly_usage=None):
     if year_usage is not None:
         year_usage = int(round(year_usage))
 
+    # MJSEČNA POTROŠNJA IZ OČITANJA (zadnje 3 godine)
+    monthly_usage = _build_monthly_usage_last_years(readings, years_back=6)
+
     return {
         "last_reading": current,
         "previous_reading": previous,
@@ -600,7 +582,6 @@ def build_portal_payload(
     summary,
     invoices,
     racuni_period,
-    monthly_usage=None,
 ):
     """
     readings       - lista očitanja sa root stranice
@@ -608,10 +589,9 @@ def build_portal_payload(
     summary        - sažetak financija (div.summary)
     invoices       - računi iz /Promet -> racuni sekcije
     racuni_period  - period računa
-    monthly_usage  - dict godina -> [12 mjesečnih potrošnji] ili None
     """
     finance = _compute_finance(readings, promet_rows, summary, invoices)
-    consumption = _compute_consumption(readings, monthly_usage)
+    consumption = _compute_consumption(readings)
 
     return {
         "finance": finance,
