@@ -15,7 +15,9 @@ PageContent = Tuple[int, BeautifulSoup, str]
 def _fetch_html(session: requests.Session, url: str) -> Tuple[BeautifulSoup, str]:
     logger.info("Fetching URL: %s", url)
     response = session.get(url, headers=HEADERS, allow_redirects=True)
-    logger.debug("GET %s -> status %s, final url %s", url, response.status_code, response.url)
+    logger.debug(
+        "GET %s -> status %s, final url %s, content_length=%s", url, response.status_code, response.url, len(response.text)
+    )
     if response.status_code != 200:
         logger.error("GET %s failed with status %s", url, response.status_code)
         raise RuntimeError(f"GET {url} failed: {response.status_code}")

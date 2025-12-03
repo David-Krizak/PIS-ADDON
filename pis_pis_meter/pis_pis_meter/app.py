@@ -75,15 +75,25 @@ def _fetch_data(force_refresh: bool = False) -> Tuple[dict, float, bool, Optiona
     now = time.time()
 
     if not force_refresh and _cache_data and (now - _cache_timestamp) < CACHE_TTL_SECONDS:
+        logger.debug(
+            "Serving cached data (age=%.1fs, ttl=%ss)", now - _cache_timestamp, CACHE_TTL_SECONDS
+        )
         return _cache_data, _cache_timestamp, True, None
 
     last_error: Optional[Exception] = None
     for attempt in range(1, RETRY_ATTEMPTS + 1):
+        start = time.time()
         try:
             logger.info("Fetching fresh data from PIS portal (force=%s, attempt=%s)", force_refresh, attempt)
             data = collect_pis_data(USERNAME, PASSWORD)
             _cache_data = data
             _cache_timestamp = time.time()
+            logger.info(
+                "Fetch attempt %s successful in %.2fs (cached_at=%s)",
+                attempt,
+                _cache_timestamp - start,
+                datetime.utcfromtimestamp(_cache_timestamp).isoformat() + "Z",
+            )
             return data, _cache_timestamp, False, None
         except Exception as exc:  # noqa: BLE001
             last_error = exc

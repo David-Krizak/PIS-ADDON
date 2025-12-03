@@ -44,6 +44,7 @@ def _perform_login(session: requests.Session, username: str, password: str) -> N
     logger.info("Starting login to PIS portal")
     response = session.get(LOGIN_URL, headers=HEADERS, allow_redirects=True)
     logger.debug("Login GET %s -> status %s, url %s", LOGIN_URL, response.status_code, response.url)
+    logger.debug("Login GET response headers: %s", dict(response.headers))
     if response.status_code != 200:
         raise RuntimeError(f"Login page GET failed: {response.status_code}")
 
@@ -75,6 +76,7 @@ def _perform_login(session: requests.Session, username: str, password: str) -> N
         login_response.status_code,
         login_response.url,
     )
+    logger.debug("Login POST response headers: %s", dict(login_response.headers))
 
     cookies = session.cookies.get_dict()
     logger.debug("Cookies after login: keys=%s", list(cookies.keys()))
