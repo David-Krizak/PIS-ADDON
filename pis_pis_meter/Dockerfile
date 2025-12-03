@@ -10,9 +10,6 @@ COPY . .
 
 RUN chmod -R a+rX /usr/src/app
 
-# >>> add this line <<<
-ENV PYTHONPATH=/usr/src/app
-
 COPY run.sh /run.sh
 RUN chmod a+x /run.sh
 
