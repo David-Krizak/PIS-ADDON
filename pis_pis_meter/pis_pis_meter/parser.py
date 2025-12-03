@@ -38,24 +38,71 @@ def _parse_int_reading(value: str):
 
 
 def _parse_hr_date(text: str):
-    """Parse dates written as digits (e.g. ``2.1.2024``).
+    """Parse Croatian dates with either numeric month or month name.
 
-    Month name handling was dropped to keep the parser lean; the portal also
-    renders numeric variants that are sufficient for the add-on needs.
+    Examples:
+      - '3.12.2025.'
+      - '27. studenog 2025.'
+      - '30. listopada 2025.'
     """
 
     if not text:
         return None
-    cleaned = text.strip().replace(" ", "")
-    match = re.match(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", cleaned)
-    if not match:
-        logger.debug("Failed to parse HR numeric date from %r", text)
+
+    cleaned = text.strip()
+    # Remove double spaces, non-breaking, trailing dots
+    cleaned = cleaned.replace("\xa0", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.rstrip(" .")
+
+    # 1) Try pure numeric first: 3.12.2025
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$", cleaned)
+    if m:
+        day = int(m.group(1))
+        month = int(m.group(2))
+        year = int(m.group(3))
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day)
+        except ValueError:
+            logger.debug("Invalid numeric date components from %r", text)
+            return None
+
+    # 2) Month-name format: 27. studenog 2025
+    #    capture: day, month word, year
+    m = re.match(r"^(\d{1,2})\.\s*([A-Za-zčćšđžČĆŠĐŽ]+)\s+(\d{2,4})$", cleaned)
+    if not m:
+        logger.debug("Failed to parse HR date from %r", text)
         return None
-    day = int(match.group(1))
-    month = int(match.group(2))
-    year = int(match.group(3))
+
+    day = int(m.group(1))
+    month_word = m.group(2).lower()
+    year = int(m.group(3))
     if year < 100:
         year += 2000
+
+    # Genitive + nominative forms
+    MONTHS = {
+        "siječanj": 1, "siječnja": 1,
+        "veljača": 2, "veljače": 2,
+        "ožujak": 3, "ožujka": 3,
+        "travanj": 4, "travnja": 4,
+        "svibanj": 5, "svibnja": 5,
+        "lipanj": 6, "lipnja": 6,
+        "srpanj": 7, "srpnja": 7,
+        "kolovoz": 8, "kolovoza": 8,
+        "rujan": 9, "rujna": 9,
+        "listopad": 10, "listopada": 10,
+        "studeni": 11, "studenog": 11,
+        "prosinac": 12, "prosinca": 12,
+    }
+
+    month = MONTHS.get(month_word)
+    if not month:
+        logger.debug("Unknown HR month name %r in %r", month_word, text)
+        return None
+
     try:
         return date(year, month, day)
     except ValueError:
@@ -322,7 +369,7 @@ def _compute_finance(promet_rows, promet_summary, invoices):
 
 
 def _compute_consumption(readings):
-    """Use the last two readings to estimate usage and price."""
+    """Use readings to estimate last period usage, price and yearly total."""
 
     today = date.today()
 
@@ -343,6 +390,7 @@ def _compute_consumption(readings):
         else None
     )
 
+    # --- last period usage and stats ---
     usage = None
     days_between = None
     avg_daily = None
@@ -354,11 +402,19 @@ def _compute_consumption(readings):
         and previous_date
     ):
         usage = current_value - previous_value
-        days_between = (current_date - previous_date).days
-        if days_between > 0:
-            avg_daily = usage / days_between
-        elif days_between == 0:
-            avg_daily = 0
+        if usage < 0:
+            logger.debug(
+                "Current reading (%s) lower than previous (%s); ignoring usage",
+                current_value,
+                previous_value,
+            )
+            usage = None
+        else:
+            days_between = (current_date - previous_date).days
+            if days_between > 0:
+                avg_daily = usage / days_between
+            elif days_between == 0:
+                avg_daily = 0.0
 
     days_since_last = None
     if current_date:
@@ -366,6 +422,44 @@ def _compute_consumption(readings):
 
     PRICE_PER_KWH = 0.55
     approx_cost = usage * PRICE_PER_KWH if usage is not None else None
+
+    # --- yearly total consumption (all readings for latest year) ---
+    year_usage = None
+    year_start = None
+    year_end = None
+
+    # Collect all readings with valid date+value
+    dated_readings = []
+    for r in readings:
+        d_iso = r.get("date")
+        v = r.get("value")
+        if not d_iso or v is None:
+            continue
+        try:
+            d_obj = datetime.fromisoformat(d_iso).date()
+        except ValueError:
+            continue
+        dated_readings.append((d_obj, v))
+
+    if dated_readings:
+        # sort oldest -> newest
+        dated_readings.sort(key=lambda x: x[0])
+
+        # target year: year of the latest reading
+        target_year = dated_readings[-1][0].year
+        year_readings = [(d, v) for (d, v) in dated_readings if d.year == target_year]
+
+        if len(year_readings) >= 2:
+            year_start = year_readings[0][0]
+            year_end = year_readings[-1][0]
+            total = 0
+            last_v = year_readings[0][1]
+            for (d, v) in year_readings[1:]:
+                diff = v - last_v
+                if diff > 0:
+                    total += diff
+                last_v = v
+            year_usage = total
 
     return {
         "last_reading": current,
@@ -375,6 +469,9 @@ def _compute_consumption(readings):
         "avg_daily_usage": avg_daily,
         "days_since_last_reading": days_since_last,
         "approx_last_period_cost": approx_cost,
+        "year_usage": year_usage,
+        "year_period_start": year_start.isoformat() if year_start else None,
+        "year_period_end": year_end.isoformat() if year_end else None,
     }
 
 
