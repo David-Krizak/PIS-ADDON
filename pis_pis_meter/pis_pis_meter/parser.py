@@ -8,6 +8,18 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger("pis-addon.parser")
 
 # ---------- primitive parsers ----------
+def _classify_tx(desc: Optional[str]) -> str:
+    """Rough classification of Promet row based on description."""
+    if not desc:
+        return "other"
+    d = desc.lower()
+    if "racun za" in d:
+        return "bill"
+    if "fiksna mjesecna naknada" in d:
+        return "fixed_fee"
+    if d.startswith("rn "):
+        return "payment"
+    return "other"
 
 
 def _parse_euro_amount(text: str):
@@ -144,7 +156,7 @@ def parse_root_readings(soup: BeautifulSoup):
 
 
 def parse_promet_table(soup: BeautifulSoup):
-    """Extract charges/payments table (Promet) with basic transaction info."""
+    """Extract charges/payments table to gauge current balance."""
 
     table = soup.select_one("#tabularniPodaci #stranicenje table.altrowstable")
     if not table:
@@ -161,25 +173,22 @@ def parse_promet_table(soup: BeautifulSoup):
             continue
         row = dict(zip(headers, cols))
 
-        # Datum can be with month names ("07. studenog 2025.") – numeric parser
-        # will usually fail, which is fine; we only rely on table order.
         parsed_date = _parse_hr_date(row.get("Datum"))
+        charge_raw = row.get("Zaduženje")
+        payment_raw = row.get("Uplata")
 
-        zaduzenje_raw = row.get("Zaduženje")
-        uplata_raw = row.get("Uplata")
-
-        zaduzenje = _parse_euro_amount(zaduzenje_raw)
-        uplata = _parse_euro_amount(uplata_raw)
+        zaduzenje = _parse_euro_amount(charge_raw)
+        uplata = _parse_euro_amount(payment_raw)
 
         rows.append(
             {
                 "date_raw": row.get("Datum"),
                 "date": parsed_date.isoformat() if parsed_date else None,
                 "description": row.get("Opis"),
+                "charge_raw": charge_raw,
                 "charge": zaduzenje,
-                "charge_raw": zaduzenje_raw,
+                "payment_raw": payment_raw,
                 "payment": uplata,
-                "payment_raw": uplata_raw,
             }
         )
 
@@ -295,19 +304,16 @@ def parse_racuni_period(soup: BeautifulSoup):
 
 # ---------- data shaping ----------
 
-
-def _compute_finance(promet_rows, promet_summary, invoices):
-    """Return only what the UI needs: unpaid info and the latest bill.
-
-    - Outstanding / status are computed from the summary block.
-    - Latest invoice is taken from Promet rows (01/Racun za ...), using table order.
-    """
+def _compute_finance(readings, promet_rows, promet_summary, invoices):
+    """Return what the UI needs: balance, last bill, last payment."""
 
     previous_debt = promet_summary.get("Dug iz prethodnog razdoblja", {}).get("value") or 0.0
     charges_total = promet_summary.get("Ukupno zaduženje", {}).get("value") or 0.0
     payments_total = promet_summary.get("Ukupna uplata", {}).get("value") or 0.0
+    overpayment = promet_summary.get("U preplati ste u iznosu od", {}).get("value") or 0.0
 
     outstanding = previous_debt + charges_total - payments_total
+
     EPS = 0.005
     if abs(outstanding) < EPS:
         outstanding = 0.0
@@ -317,54 +323,66 @@ def _compute_finance(promet_rows, promet_summary, invoices):
     else:
         status = "credit"
 
-    # Find newest invoice row in Promet: description like "01/Racun za ..."
-    latest_tx = None
-    for tx in promet_rows or []:
-        desc = (tx.get("description") or "").lower()
-        if "racun za" in desc:
-            latest_tx = tx
+    # nice clean number
+    outstanding = round(outstanding, 2)
+
+    # --- latest bill (racun) from Promet rows ---
+    latest_bill_row = None
+    for row in sorted(promet_rows, key=lambda r: r.get("date") or "", reverse=True):
+        if _classify_tx(row.get("description")) == "bill":
+            latest_bill_row = row
             break
 
-    # Fallback: just take the first row if we didn't find a "Racun za" entry
-    if latest_tx is None and promet_rows:
-        latest_tx = promet_rows[0]
-
     latest_invoice = None
-    if latest_tx is not None:
-        charge = latest_tx.get("charge")
-        payment = latest_tx.get("payment")
-
-        amount = None
-        amount_raw = None
-
-        # Prefer whichever column actually has a positive amount
-        if charge is not None and charge > 0:
-            amount = charge
-            amount_raw = latest_tx.get("charge_raw")
-        elif payment is not None and payment > 0:
-            amount = payment
-            amount_raw = latest_tx.get("payment_raw")
+    if latest_bill_row:
+        # for bills, the amount sits in "payment" column (your HTML)
+        amount_val = latest_bill_row.get("payment") or latest_bill_row.get("charge")
+        amount_raw = latest_bill_row.get("payment_raw") or latest_bill_row.get("charge_raw")
+        if amount_val is not None:
+            amount_val = round(float(amount_val), 2)
 
         latest_invoice = {
-            "number": None,  # Promet table doesn't expose invoice number directly
-            "description": latest_tx.get("description"),
-            "issue_date_raw": latest_tx.get("date_raw"),
-            "issue_date": latest_tx.get("date"),  # usually None – month names
+            "description": latest_bill_row.get("description"),
+            "issue_date_raw": latest_bill_row.get("date_raw"),
+            "issue_date": latest_bill_row.get("date"),
+            "amount_raw": amount_raw,
+            "amount": amount_val,
             "due_date_raw": None,
             "due_date": None,
-            "amount_raw": amount_raw,
-            "amount": amount,
+            "number": None,
         }
+
+    # --- last payment (any positive payment row) ---
+    last_payment = None
+    for row in sorted(promet_rows, key=lambda r: r.get("date") or "", reverse=True):
+        if row.get("payment"):
+            amt = round(float(row["payment"]), 2)
+            last_payment = {
+                "date_raw": row.get("date_raw"),
+                "date": row.get("date"),
+                "amount_raw": row.get("payment_raw"),
+                "amount": amt,
+                "description": row.get("description"),
+            }
+            break
 
     finance = {
         "status": status,
         "outstanding": outstanding,
+        "previous_debt": previous_debt,
+        "charges_total": charges_total,
+        "payments_total": payments_total,
+        "overpayment": overpayment,
         "unpaid": {
             "count": 1 if outstanding > 0 else 0,
             "total": outstanding if outstanding > 0 else 0.0,
         },
         "latest_invoice": latest_invoice,
+        "last_payment": last_payment,
+        "has_unpaid": outstanding > 0,
+        "is_in_credit": outstanding < 0 or overpayment > 0,
     }
+
     return finance
 
 
@@ -390,7 +408,6 @@ def _compute_consumption(readings):
         else None
     )
 
-    # --- last period usage and stats ---
     usage = None
     days_between = None
     avg_daily = None
@@ -423,12 +440,11 @@ def _compute_consumption(readings):
     PRICE_PER_KWH = 0.55
     approx_cost = usage * PRICE_PER_KWH if usage is not None else None
 
-    # --- yearly total consumption (all readings for latest year) ---
+    # --- yearly total from readings in same year as latest ---
     year_usage = None
     year_start = None
     year_end = None
 
-    # Collect all readings with valid date+value
     dated_readings = []
     for r in readings:
         d_iso = r.get("date")
@@ -442,10 +458,7 @@ def _compute_consumption(readings):
         dated_readings.append((d_obj, v))
 
     if dated_readings:
-        # sort oldest -> newest
         dated_readings.sort(key=lambda x: x[0])
-
-        # target year: year of the latest reading
         target_year = dated_readings[-1][0].year
         year_readings = [(d, v) for (d, v) in dated_readings if d.year == target_year]
 
@@ -460,6 +473,14 @@ def _compute_consumption(readings):
                     total += diff
                 last_v = v
             year_usage = total
+
+    # rounding / cleaning
+    if approx_cost is not None:
+        approx_cost = round(approx_cost, 2)
+    if avg_daily is not None:
+        avg_daily = round(avg_daily, 3)
+    if year_usage is not None:
+        year_usage = int(round(year_usage))
 
     return {
         "last_reading": current,
@@ -479,7 +500,7 @@ def _compute_consumption(readings):
 
 
 def build_portal_payload(readings, promet_rows, summary, invoices, racuni_period):
-    finance = _compute_finance(promet_rows, summary, invoices)
+    finance = _compute_finance(readings, promet_rows, summary, invoices)
     consumption = _compute_consumption(readings)
 
     return {

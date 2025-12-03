@@ -1,3 +1,3 @@
-## 0.3.16
+## 0.3.17
 
-- Parser prerađen
+- Parser dorada
