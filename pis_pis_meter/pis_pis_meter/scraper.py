@@ -13,7 +13,9 @@ from .parser import (
     parse_racuni,
     parse_racuni_period,
     parse_root_readings,
+    parse_monthly_usage,
 )
+
 
 logger = logging.getLogger("pis-addon.scraper")
 
@@ -43,6 +45,8 @@ def collect_pis_data(username: str, password: str) -> dict:
         )
 
         readings = parse_root_readings(root_soup)
+        monthly_usage = parse_monthly_usage(root_soup)  # <-- OVDJE PARSIRAŠ
+
         promet_rows = parse_promet_table(promet_soup)
         summary = parse_promet_summary(promet_soup)
 
@@ -54,7 +58,15 @@ def collect_pis_data(username: str, password: str) -> dict:
                 racuni_period = parse_racuni_period(soup)
             invoices.extend(parse_racuni(soup))
 
-        result = build_portal_payload(readings, promet_rows, summary, invoices, racuni_period)
+        result = build_portal_payload(
+            readings=readings,
+            promet_rows=promet_rows,
+            summary=summary,
+            invoices=invoices,
+            racuni_period=racuni_period,
+            monthly_usage=monthly_usage,  # <-- PROSLIJEDI GA
+        )
+
         logger.info(
             "collect_pis_data: done. readings=%s, promet_rows=%s, invoices=%s",
             len(readings),

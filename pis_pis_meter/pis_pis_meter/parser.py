@@ -569,7 +569,9 @@ def _compute_consumption(readings, monthly_usage=None):
 
 # ---------- public API ----------
 
-monthly_usage = parse_monthly_usage(root_soup)
+
+
+# ---------- public API ----------
 
 def build_portal_payload(
     readings,
@@ -577,8 +579,16 @@ def build_portal_payload(
     summary,
     invoices,
     racuni_period,
-    monthly_usage=monthly_usage,
+    monthly_usage=None,
 ):
+    """
+    readings       - lista očitanja sa root stranice
+    promet_rows    - redovi iz Promet tablice
+    summary        - sažetak financija (div.summary)
+    invoices       - računi iz /Promet -> racuni sekcije
+    racuni_period  - period računa (tekst gore "Prikazuju se računi za period...")
+    monthly_usage  - dict godina -> [12 mjesečnih potrošnji] ili None
+    """
     finance = _compute_finance(readings, promet_rows, summary, invoices)
     consumption = _compute_consumption(readings, monthly_usage)
 
