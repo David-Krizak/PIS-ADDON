@@ -65,6 +65,7 @@ def _parse_hr_date(text: str):
 
 # ---------- HTML parsing ----------
 
+
 def parse_root_readings(soup: BeautifulSoup):
     """Read the last few meter values from the landing page."""
 
@@ -96,7 +97,7 @@ def parse_root_readings(soup: BeautifulSoup):
 
 
 def parse_promet_table(soup: BeautifulSoup):
-    """Extract charges/payments table to gauge current balance."""
+    """Extract charges/payments table (Promet) with basic transaction info."""
 
     table = soup.select_one("#tabularniPodaci #stranicenje table.altrowstable")
     if not table:
@@ -112,15 +113,26 @@ def parse_promet_table(soup: BeautifulSoup):
         if not cols:
             continue
         row = dict(zip(headers, cols))
+
+        # Datum can be with month names ("07. studenog 2025.") – numeric parser
+        # will usually fail, which is fine; we only rely on table order.
         parsed_date = _parse_hr_date(row.get("Datum"))
-        zaduzenje = _parse_euro_amount(row.get("Zaduženje"))
-        uplata = _parse_euro_amount(row.get("Uplata"))
+
+        zaduzenje_raw = row.get("Zaduženje")
+        uplata_raw = row.get("Uplata")
+
+        zaduzenje = _parse_euro_amount(zaduzenje_raw)
+        uplata = _parse_euro_amount(uplata_raw)
+
         rows.append(
             {
                 "date_raw": row.get("Datum"),
                 "date": parsed_date.isoformat() if parsed_date else None,
+                "description": row.get("Opis"),
                 "charge": zaduzenje,
+                "charge_raw": zaduzenje_raw,
                 "payment": uplata,
+                "payment_raw": uplata_raw,
             }
         )
 
@@ -156,7 +168,11 @@ def parse_promet_summary(soup: BeautifulSoup):
 
 
 def parse_racuni(soup: BeautifulSoup):
-    """Collect minimal invoice details (number, dates, amount)."""
+    """Collect minimal invoice details (number, dates, amount) from racuni section.
+
+    NOTE: For latest invoice we now primarily trust the Promet table. This parser
+    is kept for compatibility / future use.
+    """
 
     invoices = []
     table = soup.select_one("#racuni table.altrowstable")
@@ -232,8 +248,13 @@ def parse_racuni_period(soup: BeautifulSoup):
 
 # ---------- data shaping ----------
 
-def _compute_finance(readings, promet_summary, invoices):
-    """Return only what the UI needs: unpaid info and the latest bill."""
+
+def _compute_finance(promet_rows, promet_summary, invoices):
+    """Return only what the UI needs: unpaid info and the latest bill.
+
+    - Outstanding / status are computed from the summary block.
+    - Latest invoice is taken from Promet rows (01/Racun za ...), using table order.
+    """
 
     previous_debt = promet_summary.get("Dug iz prethodnog razdoblja", {}).get("value") or 0.0
     charges_total = promet_summary.get("Ukupno zaduženje", {}).get("value") or 0.0
@@ -249,12 +270,44 @@ def _compute_finance(readings, promet_summary, invoices):
     else:
         status = "credit"
 
-    sorted_invoices = sorted(
-        invoices,
-        key=lambda inv: inv.get("issue_date") or inv.get("due_date") or "",
-        reverse=True,
-    )
-    latest_invoice = sorted_invoices[0] if sorted_invoices else None
+    # Find newest invoice row in Promet: description like "01/Racun za ..."
+    latest_tx = None
+    for tx in promet_rows or []:
+        desc = (tx.get("description") or "").lower()
+        if "racun za" in desc:
+            latest_tx = tx
+            break
+
+    # Fallback: just take the first row if we didn't find a "Racun za" entry
+    if latest_tx is None and promet_rows:
+        latest_tx = promet_rows[0]
+
+    latest_invoice = None
+    if latest_tx is not None:
+        charge = latest_tx.get("charge")
+        payment = latest_tx.get("payment")
+
+        amount = None
+        amount_raw = None
+
+        # Prefer whichever column actually has a positive amount
+        if charge is not None and charge > 0:
+            amount = charge
+            amount_raw = latest_tx.get("charge_raw")
+        elif payment is not None and payment > 0:
+            amount = payment
+            amount_raw = latest_tx.get("payment_raw")
+
+        latest_invoice = {
+            "number": None,  # Promet table doesn't expose invoice number directly
+            "description": latest_tx.get("description"),
+            "issue_date_raw": latest_tx.get("date_raw"),
+            "issue_date": latest_tx.get("date"),  # usually None – month names
+            "due_date_raw": None,
+            "due_date": None,
+            "amount_raw": amount_raw,
+            "amount": amount,
+        }
 
     finance = {
         "status": status,
@@ -327,8 +380,9 @@ def _compute_consumption(readings):
 
 # ---------- public API ----------
 
+
 def build_portal_payload(readings, promet_rows, summary, invoices, racuni_period):
-    finance = _compute_finance(readings, summary, invoices)
+    finance = _compute_finance(promet_rows, summary, invoices)
     consumption = _compute_consumption(readings)
 
     return {
