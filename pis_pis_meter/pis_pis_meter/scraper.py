@@ -35,13 +35,21 @@ def collect_pis_data(username: str, password: str) -> dict:
         promet_soup, promet_html = fetch_promet(session)
         racuni_pages = fetch_racuni_pages(session, promet_soup, promet_html)
 
+        logger.debug(
+            "Downloaded pages: root_ok=%s promet_len=%s racuni_pages=%s",
+            bool(root_soup),
+            len(promet_html),
+            len(racuni_pages),
+        )
+
         readings = parse_root_readings(root_soup)
         promet_rows = parse_promet_table(promet_soup)
         summary = parse_promet_summary(promet_soup)
 
         racuni_period: Optional[Dict] = None
         invoices: List[Dict] = []
-        for page, soup, _ in racuni_pages:
+        for page, soup, html in racuni_pages:
+            logger.debug("Parsing racuni page %s (len=%s)", page, len(html))
             if racuni_period is None:
                 racuni_period = parse_racuni_period(soup)
             invoices.extend(parse_racuni(soup))
